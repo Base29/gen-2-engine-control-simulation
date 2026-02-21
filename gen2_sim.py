@@ -272,7 +272,10 @@ class EngineSimulator:
         print(f"Final state: {self.state.value}")
         print(f"Final true RPM: {self.true_rpm:.1f}")
         print(f"Final filtered RPM: {self.filtered_rpm:.1f}")
-        print(f"Standard RPM target: {self.standard_rpm_target:.1f if self.standard_rpm_target else 'Not set'}")
+        if self.standard_rpm_target is not None:
+            print(f"Standard RPM target: {self.standard_rpm_target:.1f}")
+        else:
+            print("Standard RPM target: Not set")
         
         # Count state durations
         state_times = {s: 0.0 for s in State}
