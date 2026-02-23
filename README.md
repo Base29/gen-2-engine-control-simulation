@@ -2,6 +2,31 @@
 
 A comprehensive simulation of a Gen2 engine control algorithm featuring a state machine with idle, power, and economy modes. The simulation models RPM dynamics, Hall sensor pulse generation, and intelligent pulse scheduling across 4 cylinders.
 
+---
+
+## 🚀 START HERE
+
+**New to this simulation? Read these files in order:**
+
+1. **START_HERE.md** - Quick start guide with step-by-step instructions
+2. **SCENARIO_NOTES.md** - Detailed explanation of what happens in each scenario
+3. **README.md** (this file) - Complete technical documentation
+
+---
+
+## Quick Start
+
+```bash
+# Run the simulation
+python gen2_sim.py
+
+# Output files will be created:
+# - CSV files with all data
+# - PNG files with graphs
+```
+
+---
+
 ## Overview
 
 This simulation implements a sophisticated engine control system that:

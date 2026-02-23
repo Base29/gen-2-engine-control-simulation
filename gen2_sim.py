@@ -3,21 +3,22 @@ gen2_sim.py - Gen2 4-Cylinder Engine Control Simulation
 
 STATE MACHINE:
 - OFF: Engine not running
-- DEFAULT_IDLE: Maintains RPM above default_idle_rpm_min with intermittent pulses
-- MODE1_POWER: Pedal position 2 triggers acceleration; frequent pulses while pedal unstable
-- MODE2_ECONOMY: Maintains RPM above active minimum (default idle or standard target) with intermittent pulses
+- DEFAULT_IDLE: Maintains RPM above 650 with intermittent pulses (1 cylinder)
+- MODE1_POWER: Pedal position 2 triggers acceleration; frequent pulses (4 cylinders, sequence 1→3→2→4)
+- MODE2_ECONOMY: Maintains RPM above captured target with intermittent pulses (1 cylinder, no cooldown)
 
 TRANSITIONS:
-- OFF -> DEFAULT_IDLE: start_cmd=True
-- DEFAULT_IDLE -> MODE1_POWER: pedal_pos=2
-- MODE1_POWER -> MODE2_ECONOMY: pedal steady for 5 seconds (standard_rpm_target set from filtered RPM)
-- MODE2_ECONOMY -> DEFAULT_IDLE: brake=True (resets economy flags)
-- Any state -> OFF: start_cmd=False (not used in scenarios)
+- OFF → DEFAULT_IDLE: start_cmd=True (starter provides initial RPM)
+- DEFAULT_IDLE → MODE1_POWER: pedal_pos=2
+- MODE1_POWER → MODE2_ECONOMY: pedal steady for 5 seconds (standard_rpm_target captured from filtered RPM)
+- MODE2_ECONOMY → DEFAULT_IDLE: brake=True (resets economy flags)
+- Any state → OFF: start_cmd=False (not used in scenarios)
 
 RPM SIMULATION:
 - RPM decays via drag: rpm -= drag * rpm * dt
 - Each pulse adds gain: rpm += pulse_gain
 - True RPM is the physical simulation value
+- Starter motor effect simulated by initial pulses bringing RPM from 0
 
 HALL PULSE GENERATION & MEASUREMENT:
 - Hall sensor generates pulses at intervals based on true RPM
@@ -26,10 +27,12 @@ HALL PULSE GENERATION & MEASUREMENT:
 
 PULSE SCHEDULING:
 - Hysteresis: Only fire if RPM drops below (target - hysteresis)
-- Cooldown: Minimum time between pulses to prevent over-firing
-- Round-robin: Cylinders fire in sequence (0,1,2,3,0,...)
-- MODE1_POWER: More frequent pulses (simulates recorded activation sequence)
-- MODE2_ECONOMY: Intermittent pulses only when needed
+- Cooldown: Minimum time between pulses (0.1s) in DEFAULT_IDLE and MODE1_POWER
+- No cooldown in MODE2_ECONOMY for responsive efficiency
+- Cylinder selection:
+  * DEFAULT_IDLE: Only cylinder 0 (Cylinder 1 in real engine)
+  * MODE1_POWER: All 4 cylinders in sequence 0→2→1→3 (1→3→2→4 in real engine)
+  * MODE2_ECONOMY: Only cylinder 0 (Cylinder 1 in real engine)
 """
 
 import csv
@@ -52,15 +55,17 @@ class State(Enum):
 class Config:
     dt: float = 0.01  # timestep in seconds
     cylinder_count: int = 4
-    default_idle_rpm_min: float = 800.0
+    default_idle_rpm_min: float = 650.0  # 4-cylinder idle RPM
     pedal_steady_seconds: float = 5.0
     drag: float = 0.05  # RPM decay coefficient
     pulse_gain: float = 50.0  # RPM increase per pulse
     hysteresis: float = 50.0  # RPM below target before firing
-    cooldown: float = 0.1  # minimum seconds between pulses
+    cooldown: float = 0.1  # minimum seconds between pulses (not used in Mode 2)
     filter_alpha: float = 0.1  # low-pass filter coefficient
     noise_enabled: bool = False
     noise_seed: int = 42
+    # Firing sequence for power mode: 1, 3, 2, 4 (converted to 0-indexed: 0, 2, 1, 3)
+    power_firing_sequence: tuple = (0, 2, 1, 3)
 
 
 class EngineSimulator:
@@ -71,6 +76,7 @@ class EngineSimulator:
         self.measured_rpm = 0.0
         self.filtered_rpm = 0.0
         self.current_cylinder = 0
+        self.power_sequence_index = 0  # Track position in power firing sequence
         self.last_pulse_time = -999.0
         self.time = 0.0
         
@@ -100,26 +106,34 @@ class EngineSimulator:
         if self.state == State.OFF:
             return False
         
-        # Check cooldown
-        if self.time - self.last_pulse_time < self.config.cooldown:
-            return False
+        # Check cooldown (not used in MODE2_ECONOMY)
+        if self.state != State.MODE2_ECONOMY:
+            if self.time - self.last_pulse_time < self.config.cooldown:
+                return False
         
         target = self.get_active_rpm_target()
         
         if self.state == State.MODE1_POWER:
-            # More aggressive firing in power mode
+            # More aggressive firing in power mode (4 cylinders)
             return self.filtered_rpm < target + 200.0
         elif self.state in [State.DEFAULT_IDLE, State.MODE2_ECONOMY]:
-            # Hysteresis-based firing
+            # Hysteresis-based firing (1 cylinder at idle/economy)
             return self.filtered_rpm < (target - self.config.hysteresis)
         
         return False
     
     def fire_pulse(self):
-        """Fire a pulse on the current cylinder and advance round-robin."""
+        """Fire a pulse on the current cylinder and advance based on mode."""
         self.true_rpm += self.config.pulse_gain
         self.last_pulse_time = self.time
-        self.current_cylinder = (self.current_cylinder + 1) % self.config.cylinder_count
+        
+        if self.state == State.MODE1_POWER:
+            # Power mode: Use firing sequence 1, 3, 2, 4 (0-indexed: 0, 2, 1, 3)
+            self.current_cylinder = self.config.power_firing_sequence[self.power_sequence_index]
+            self.power_sequence_index = (self.power_sequence_index + 1) % len(self.config.power_firing_sequence)
+        else:
+            # Idle/Economy mode: Only cylinder 0 (cylinder 1 in 1-indexed)
+            self.current_cylinder = 0
     
     def update_hall_sensor(self):
         """Simulate Hall sensor pulse generation and RPM measurement."""
