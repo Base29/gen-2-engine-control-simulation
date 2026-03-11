@@ -38,6 +38,7 @@ PULSE SCHEDULING:
 import csv
 import os
 import random
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -50,6 +51,97 @@ import matplotlib.pyplot as plt
 # Resolve output directory to the folder that contains this script,
 # regardless of the working directory the user launches it from.
 SCRIPT_DIR = Path(__file__).resolve().parent
+
+# ---------------------------------------------------------------------------
+# Optional rich terminal UI – falls back to plain print() if not installed.
+# ---------------------------------------------------------------------------
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.progress import (
+        Progress, SpinnerColumn, BarColumn,
+        TextColumn, TimeElapsedColumn, TaskProgressColumn,
+    )
+    from rich.table import Table
+    from rich.text import Text
+    from rich import box
+    from rich.rule import Rule
+    from rich.style import Style
+    _RICH = True
+except ImportError:          # pragma: no cover
+    _RICH = False
+
+console = Console() if _RICH else None
+
+# State → (label, rich style)
+_STATE_STYLE = {
+    "OFF":           ("⬛ OFF",            "dim white"),
+    "DEFAULT_IDLE":  ("🔵 DEFAULT_IDLE",   "bold cyan"),
+    "MODE1_POWER":   ("🔴 MODE1_POWER",    "bold red"),
+    "MODE2_ECONOMY": ("🟢 MODE2_ECONOMY",  "bold green"),
+}
+
+
+def _styled_state(state_value: str) -> str:
+    """Return a Rich-markup string for a state label, or plain text."""
+    label, style = _STATE_STYLE.get(state_value, (state_value, "white"))
+    return f"[{style}]{label}[/{style}]"
+
+
+def print_banner():
+    """Display the startup ASCII banner."""
+    ascii_art = r"""
+  ██████╗ ███████╗███╗   ██╗    ██████╗      ███████╗██╗███╗   ███╗
+ ██╔════╝ ██╔════╝████╗  ██║    ╚════██╗     ██╔════╝██║████╗ ████║
+ ██║  ███╗█████╗  ██╔██╗ ██║     █████╔╝     ███████╗██║██╔████╔██║
+ ██║   ██║██╔══╝  ██║╚██╗██║    ██╔═══╝      ╚════██║██║██║╚██╔╝██║
+ ╚██████╔╝███████╗██║ ╚████║    ███████╗     ███████║██║██║ ╚═╝ ██║
+  ╚═════╝ ╚══════╝╚═╝  ╚═══╝    ╚══════╝     ╚══════╝╚═╝╚═╝     ╚═╝
+                    4-Cylinder Engine Control Simulation
+"""
+    if _RICH:
+        console.print(Panel(
+            Text(ascii_art, style="bold yellow", justify="center"),
+            border_style="yellow",
+            subtitle="[dim]v2.0  |  Windows · macOS · Linux[/dim]",
+            padding=(0, 2),
+        ))
+    else:
+        print(ascii_art)
+        print("=" * 68)
+
+
+def print_scenario_header(name: str, index: int, total: int):
+    """Print a styled scenario header."""
+    if _RICH:
+        console.print()
+        console.print(Rule(
+            f"[bold white]SCENARIO {index}/{total}  ·  {name}[/bold white]",
+            style="yellow",
+        ))
+    else:
+        print(f"\n{'=' * 60}")
+        print(f"SCENARIO {index}/{total}: {name}")
+        print("=" * 60)
+
+
+def print_completion_banner(total_scenarios: int):
+    """Print a completion banner after all scenarios finish."""
+    if _RICH:
+        console.print()
+        console.print(Panel(
+            Text(
+                f"✅  All {total_scenarios} scenarios completed successfully!",
+                style="bold green",
+                justify="center",
+            ),
+            border_style="green",
+            padding=(1, 4),
+        ))
+    else:
+        print("\n" + "=" * 60)
+        print(f"ALL {total_scenarios} SCENARIOS COMPLETE")
+        print("=" * 60)
 
 
 class State(Enum):
@@ -289,42 +381,117 @@ class EngineSimulator:
         """Print summary statistics."""
         if not self.log:
             return
-        
-        print("\n=== SIMULATION SUMMARY ===")
-        print(f"Total time: {self.time:.2f} seconds")
-        print(f"Final state: {self.state.value}")
-        print(f"Final true RPM: {self.true_rpm:.1f}")
-        print(f"Final filtered RPM: {self.filtered_rpm:.1f}")
-        if self.standard_rpm_target is not None:
-            print(f"Standard RPM target: {self.standard_rpm_target:.1f}")
-        else:
-            print("Standard RPM target: Not set")
-        
+
         # Count state durations
         state_times = {s: 0.0 for s in State}
         for entry in self.log:
             state_times[State(entry['state'])] += self.config.dt
-        
-        print("\nState durations:")
-        for state, duration in state_times.items():
-            if duration > 0:
-                print(f"  {state.value}: {duration:.2f}s")
+
+        if _RICH:
+            # ── Rich table summary ──────────────────────────────────────────
+            table = Table(
+                title="[bold yellow]Simulation Summary[/bold yellow]",
+                box=box.ROUNDED,
+                border_style="yellow",
+                show_header=True,
+                header_style="bold magenta",
+            )
+            table.add_column("Metric", style="bold white", min_width=28)
+            table.add_column("Value",  style="cyan",       min_width=20)
+
+            table.add_row("Total time",          f"{self.time:.2f} s")
+            table.add_row("Final state",          _styled_state(self.state.value))
+            table.add_row("Final true RPM",       f"{self.true_rpm:.1f}")
+            table.add_row("Final filtered RPM",   f"{self.filtered_rpm:.1f}")
+            target_str = (
+                f"{self.standard_rpm_target:.1f}"
+                if self.standard_rpm_target is not None
+                else "[dim]Not set[/dim]"
+            )
+            table.add_row("Standard RPM target",  target_str)
+
+            # State durations sub-table
+            dur_table = Table(
+                box=box.SIMPLE,
+                show_header=True,
+                header_style="bold magenta",
+                padding=(0, 1),
+            )
+            dur_table.add_column("State",    style="bold white")
+            dur_table.add_column("Duration", style="cyan")
+            for state, duration in state_times.items():
+                if duration > 0:
+                    label, sty = _STATE_STYLE.get(state.value, (state.value, "white"))
+                    dur_table.add_row(f"[{sty}]{label}[/{sty}]", f"{duration:.2f} s")
+
+            console.print(table)
+            console.print(dur_table)
+        else:
+            # ── Plain fallback ──────────────────────────────────────────────
+            print("\n=== SIMULATION SUMMARY ===")
+            print(f"Total time: {self.time:.2f} seconds")
+            print(f"Final state: {self.state.value}")
+            print(f"Final true RPM: {self.true_rpm:.1f}")
+            print(f"Final filtered RPM: {self.filtered_rpm:.1f}")
+            if self.standard_rpm_target is not None:
+                print(f"Standard RPM target: {self.standard_rpm_target:.1f}")
+            else:
+                print("Standard RPM target: Not set")
+            print("\nState durations:")
+            for state, duration in state_times.items():
+                if duration > 0:
+                    print(f"  {state.value}: {duration:.2f}s")
 
 
 
-def run_scenario(name: str, config: Config, inputs: List[Tuple[float, int, bool, bool]]):
+def run_scenario(
+    name: str,
+    config: Config,
+    inputs: List[Tuple[float, int, bool, bool]],
+    index: int = 1,
+    total: int = 1,
+):
     """Run a simulation scenario with given inputs."""
-    print(f"\n{'='*60}")
-    print(f"SCENARIO: {name}")
-    print(f"{'='*60}")
-    
+    print_scenario_header(name, index, total)
+
     sim = EngineSimulator(config)
-    
-    for duration, pedal_pos, brake, start_cmd in inputs:
-        steps = int(duration / config.dt)
-        for _ in range(steps):
-            sim.step(pedal_pos, brake, start_cmd)
-    
+
+    # Total simulation steps across all input segments
+    all_segments = [(int(d / config.dt), p, b, s) for d, p, b, s in inputs]
+    total_steps = sum(steps for steps, *_ in all_segments)
+
+    if _RICH:
+        with Progress(
+            SpinnerColumn(spinner_name="dots", style="yellow"),
+            TextColumn("[bold white]{task.description}"),
+            BarColumn(bar_width=38, style="yellow", complete_style="green"),
+            TaskProgressColumn(),
+            TextColumn("[cyan]{task.fields[rpm]:>8.1f} RPM[/cyan]"),
+            TextColumn("[dim]{task.fields[state]}[/dim]"),
+            TimeElapsedColumn(),
+            console=console,
+            transient=False,
+        ) as progress:
+            task = progress.add_task(
+                f"Running {name}",
+                total=total_steps,
+                rpm=0.0,
+                state="---",
+            )
+            for steps, pedal_pos, brake, start_cmd in all_segments:
+                for _ in range(steps):
+                    entry = sim.step(pedal_pos, brake, start_cmd)
+                    progress.update(
+                        task,
+                        advance=1,
+                        rpm=entry["true_rpm"],
+                        state=_STATE_STYLE.get(entry["state"], (entry["state"], ""))[0],
+                    )
+    else:
+        for steps, pedal_pos, brake, start_cmd in all_segments:
+            for _ in range(steps):
+                sim.step(pedal_pos, brake, start_cmd)
+
     # Build output paths next to this script so files are always written
     # to the project directory, regardless of the current working directory.
     # This is critical for correct behaviour on Windows when the script is
@@ -332,6 +499,11 @@ def run_scenario(name: str, config: Config, inputs: List[Tuple[float, int, bool,
     base_name = name.replace(' ', '_').lower()
     csv_path = str(SCRIPT_DIR / f"{base_name}.csv")
     png_path = str(SCRIPT_DIR / f"{base_name}.png")
+
+    if _RICH:
+        console.print(f"  [dim]📄 CSV →[/dim] [underline]{csv_path}[/underline]")
+        console.print(f"  [dim]🖼  PNG →[/dim] [underline]{png_path}[/underline]")
+
     sim.save_log(csv_path)
     sim.plot_results(png_path)
     sim.print_summary()
@@ -339,59 +511,53 @@ def run_scenario(name: str, config: Config, inputs: List[Tuple[float, int, bool,
 
 def main():
     config = Config()
-    
-    # Scenario 1: Start + idle stabilization
-    run_scenario(
-        "1_Start_Idle_Stabilization",
-        config,
-        [
-            (10.0, 1, False, True),  # Start and idle for 10 seconds
-        ]
-    )
-    
-    # Scenario 2: Pedal to 2, rpm rises, hold steady 5 sec, standard set, economy maintenance
-    run_scenario(
-        "2_Power_To_Economy",
-        config,
-        [
-            (2.0, 1, False, True),   # Start and stabilize
-            (3.0, 2, False, True),   # Pedal to 2, RPM rises
-            (6.0, 2, False, True),   # Hold steady for 5+ seconds -> economy mode
-            (5.0, 2, False, True),   # Continue in economy
-        ]
-    )
-    
-    # Scenario 3: Brake during economy -> back to default
-    run_scenario(
-        "3_Economy_Brake_Default",
-        config,
-        [
-            (2.0, 1, False, True),   # Start
-            (3.0, 2, False, True),   # Power mode
-            (6.0, 2, False, True),   # Hold steady -> economy
-            (3.0, 2, False, True),   # Economy maintenance
-            (2.0, 2, True, True),    # Brake -> back to default idle
-            (3.0, 1, False, True),   # Continue in default idle
-        ]
-    )
-    
-    # Scenario 4: Pedal jitter keeps Mode1 active
-    run_scenario(
-        "4_Pedal_Jitter_Mode1",
-        config,
-        [
-            (2.0, 1, False, True),   # Start
-            (2.0, 2, False, True),   # Pedal to 2
-            (1.0, 1, False, True),   # Jitter: back to 1
-            (2.0, 2, False, True),   # Back to 2
-            (1.5, 1, False, True),   # Jitter again
-            (3.0, 2, False, True),   # Back to 2 (never steady for 5 sec)
-        ]
-    )
-    
-    print("\n" + "="*60)
-    print("ALL SCENARIOS COMPLETE")
-    print("="*60)
+    scenarios = [
+        (
+            "1_Start_Idle_Stabilization",
+            [
+                (10.0, 1, False, True),  # Start and idle for 10 seconds
+            ],
+        ),
+        (
+            "2_Power_To_Economy",
+            [
+                (2.0, 1, False, True),   # Start and stabilize
+                (3.0, 2, False, True),   # Pedal to 2, RPM rises
+                (6.0, 2, False, True),   # Hold steady for 5+ seconds -> economy mode
+                (5.0, 2, False, True),   # Continue in economy
+            ],
+        ),
+        (
+            "3_Economy_Brake_Default",
+            [
+                (2.0, 1, False, True),   # Start
+                (3.0, 2, False, True),   # Power mode
+                (6.0, 2, False, True),   # Hold steady -> economy
+                (3.0, 2, False, True),   # Economy maintenance
+                (2.0, 2, True,  True),   # Brake -> back to default idle
+                (3.0, 1, False, True),   # Continue in default idle
+            ],
+        ),
+        (
+            "4_Pedal_Jitter_Mode1",
+            [
+                (2.0, 1, False, True),   # Start
+                (2.0, 2, False, True),   # Pedal to 2
+                (1.0, 1, False, True),   # Jitter: back to 1
+                (2.0, 2, False, True),   # Back to 2
+                (1.5, 1, False, True),   # Jitter again
+                (3.0, 2, False, True),   # Back to 2 (never steady for 5 sec)
+            ],
+        ),
+    ]
+
+    print_banner()
+
+    total = len(scenarios)
+    for i, (name, inputs) in enumerate(scenarios, start=1):
+        run_scenario(name, config, inputs, index=i, total=total)
+
+    print_completion_banner(total)
 
 
 if __name__ == "__main__":
