@@ -36,12 +36,20 @@ PULSE SCHEDULING:
 """
 
 import csv
+import os
 import random
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import List, Tuple
 
+import matplotlib
+matplotlib.use("Agg")  # Non-interactive backend – works on all OS (Windows/macOS/Linux)
 import matplotlib.pyplot as plt
+
+# Resolve output directory to the folder that contains this script,
+# regardless of the working directory the user launches it from.
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 
 class State(Enum):
@@ -274,6 +282,7 @@ class EngineSimulator:
         
         plt.tight_layout()
         plt.savefig(filename, dpi=150)
+        plt.close(fig)  # Release figure memory; prevents GUI window pop-ups on Windows
         print(f"Plot saved to {filename}")
     
     def print_summary(self):
@@ -316,8 +325,15 @@ def run_scenario(name: str, config: Config, inputs: List[Tuple[float, int, bool,
         for _ in range(steps):
             sim.step(pedal_pos, brake, start_cmd)
     
-    sim.save_log(f"{name.replace(' ', '_').lower()}.csv")
-    sim.plot_results(f"{name.replace(' ', '_').lower()}.png")
+    # Build output paths next to this script so files are always written
+    # to the project directory, regardless of the current working directory.
+    # This is critical for correct behaviour on Windows when the script is
+    # executed via double-click or from an arbitrary directory.
+    base_name = name.replace(' ', '_').lower()
+    csv_path = str(SCRIPT_DIR / f"{base_name}.csv")
+    png_path = str(SCRIPT_DIR / f"{base_name}.png")
+    sim.save_log(csv_path)
+    sim.plot_results(png_path)
     sim.print_summary()
 
 
