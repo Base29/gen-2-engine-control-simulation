@@ -1,10 +1,10 @@
 """
-gen2_sim.py - Gen2 4-Cylinder Engine Control Simulation
+gen2_sim.py - Gen2 Engine Control Simulation (4 / 6 / 8 Cylinders)
 
 STATE MACHINE:
 - OFF: Engine not running
-- DEFAULT_IDLE: Maintains RPM above 650 with intermittent pulses (1 cylinder)
-- MODE1_POWER: Pedal position 2 triggers acceleration; frequent pulses (4 cylinders, sequence 1→3→2→4)
+- DEFAULT_IDLE: Maintains RPM above idle minimum with intermittent pulses (1 cylinder)
+- MODE1_POWER: Pedal position 2 triggers acceleration; frequent pulses (all cylinders in firing order)
 - MODE2_ECONOMY: Maintains RPM above captured target with intermittent pulses (1 cylinder, no cooldown)
 
 TRANSITIONS:
@@ -25,13 +25,23 @@ HALL PULSE GENERATION & MEASUREMENT:
 - Measured RPM estimated from time between Hall pulses
 - Low-pass filter smooths measured RPM: filtered = alpha * measured + (1-alpha) * filtered_prev
 
+CYLINDER FIRING SEQUENCES (0-indexed):
+- 4-cyl: 0→2→1→3  (real-world: 1→3→2→4)
+- 6-cyl: 0→4→2→5→1→3  (real-world: 1→5→3→6→2→4)
+- 8-cyl: 0→7→3→2→5→4→6→1  (real-world: 1→8→4→3→6→5→7→2)
+
+IDLE RPM MINIMUMS (tuned per engine size):
+- 4-cyl: 650 RPM
+- 6-cyl: 600 RPM
+- 8-cyl: 550 RPM
+
 PULSE SCHEDULING:
 - Hysteresis: Only fire if RPM drops below (target - hysteresis)
 - Cooldown: Minimum time between pulses (0.1s) in DEFAULT_IDLE and MODE1_POWER
 - No cooldown in MODE2_ECONOMY for responsive efficiency
 - Cylinder selection:
   * DEFAULT_IDLE: Only cylinder 0 (Cylinder 1 in real engine)
-  * MODE1_POWER: All 4 cylinders in sequence 0→2→1→3 (1→3→2→4 in real engine)
+  * MODE1_POWER: All cylinders in engine-specific firing sequence
   * MODE2_ECONOMY: Only cylinder 0 (Cylinder 1 in real engine)
 """
 
@@ -97,13 +107,13 @@ def print_banner():
  ██║   ██║██╔══╝  ██║╚██╗██║    ██╔═══╝      ╚════██║██║██║╚██╔╝██║
  ╚██████╔╝███████╗██║ ╚████║    ███████╗     ███████║██║██║ ╚═╝ ██║
   ╚═════╝ ╚══════╝╚═╝  ╚═══╝    ╚══════╝     ╚══════╝╚═╝╚═╝     ╚═╝
-                    4-Cylinder Engine Control Simulation
+               4 / 6 / 8-Cylinder Engine Control Simulation
 """
     if _RICH:
         console.print(Panel(
             Text(ascii_art, style="bold yellow", justify="center"),
             border_style="yellow",
-            subtitle="[dim]v2.0  |  Windows · macOS · Linux[/dim]",
+            subtitle="[dim]v2.1  |  Windows · macOS · Linux[/dim]",
             padding=(0, 2),
         ))
     else:
@@ -151,21 +161,50 @@ class State(Enum):
     MODE2_ECONOMY = "MODE2_ECONOMY"
 
 
+# Default firing sequences per cylinder count (0-indexed).
+# 4-cyl:  1→3→2→4  ⟹  0,2,1,3
+# 6-cyl:  1→5→3→6→2→4  ⟹  0,4,2,5,1,3
+# 8-cyl:  1→8→4→3→6→5→7→2  ⟹  0,7,3,2,5,4,6,1
+_FIRING_SEQUENCES = {
+    4: (0, 2, 1, 3),
+    6: (0, 4, 2, 5, 1, 3),
+    8: (0, 7, 3, 2, 5, 4, 6, 1),
+}
+
+# Idle RPM minimums tuned per engine displacement / cylinder count.
+_IDLE_RPM = {
+    4: 650.0,
+    6: 600.0,
+    8: 550.0,
+}
+
+
 @dataclass
 class Config:
-    dt: float = 0.01  # timestep in seconds
-    cylinder_count: int = 4
-    default_idle_rpm_min: float = 650.0  # 4-cylinder idle RPM
+    dt: float = 0.01            # timestep in seconds
+    cylinder_count: int = 4     # supported: 4, 6, 8
     pedal_steady_seconds: float = 5.0
-    drag: float = 0.05  # RPM decay coefficient
-    pulse_gain: float = 50.0  # RPM increase per pulse
-    hysteresis: float = 50.0  # RPM below target before firing
-    cooldown: float = 0.1  # minimum seconds between pulses (not used in Mode 2)
-    filter_alpha: float = 0.1  # low-pass filter coefficient
+    drag: float = 0.05          # RPM decay coefficient
+    pulse_gain: float = 50.0    # RPM increase per pulse
+    hysteresis: float = 50.0    # RPM below target before firing
+    cooldown: float = 0.1       # minimum seconds between pulses (not used in Mode 2)
+    filter_alpha: float = 0.1   # low-pass filter coefficient
     noise_enabled: bool = False
     noise_seed: int = 42
-    # Firing sequence for power mode: 1, 3, 2, 4 (converted to 0-indexed: 0, 2, 1, 3)
-    power_firing_sequence: tuple = (0, 2, 1, 3)
+    # Optional overrides – if None, derived automatically from cylinder_count.
+    default_idle_rpm_min: float = None          # type: ignore[assignment]
+    power_firing_sequence: tuple = None         # type: ignore[assignment]
+
+    def __post_init__(self):
+        if self.cylinder_count not in _FIRING_SEQUENCES:
+            raise ValueError(
+                f"Unsupported cylinder_count={self.cylinder_count}. "
+                f"Supported values: {sorted(_FIRING_SEQUENCES.keys())}"
+            )
+        if self.default_idle_rpm_min is None:
+            self.default_idle_rpm_min = _IDLE_RPM[self.cylinder_count]
+        if self.power_firing_sequence is None:
+            self.power_firing_sequence = _FIRING_SEQUENCES[self.cylinder_count]
 
 
 class EngineSimulator:
@@ -509,52 +548,95 @@ def run_scenario(
     sim.print_summary()
 
 
+# Scenario definitions are cylinder-count-agnostic; the same driving sequences
+# are reused for every engine variant so results are directly comparable.
+_SCENARIO_INPUTS = [
+    (
+        "1_Start_Idle_Stabilization",
+        [
+            (10.0, 1, False, True),  # Start and idle for 10 seconds
+        ],
+    ),
+    (
+        "2_Power_To_Economy",
+        [
+            (2.0, 1, False, True),   # Start and stabilize
+            (3.0, 2, False, True),   # Pedal to 2, RPM rises
+            (6.0, 2, False, True),   # Hold steady for 5+ seconds -> economy mode
+            (5.0, 2, False, True),   # Continue in economy
+        ],
+    ),
+    (
+        "3_Economy_Brake_Default",
+        [
+            (2.0, 1, False, True),   # Start
+            (3.0, 2, False, True),   # Power mode
+            (6.0, 2, False, True),   # Hold steady -> economy
+            (3.0, 2, False, True),   # Economy maintenance
+            (2.0, 2, True,  True),   # Brake -> back to default idle
+            (3.0, 1, False, True),   # Continue in default idle
+        ],
+    ),
+    (
+        "4_Pedal_Jitter_Mode1",
+        [
+            (2.0, 1, False, True),   # Start
+            (2.0, 2, False, True),   # Pedal to 2
+            (1.0, 1, False, True),   # Jitter: back to 1
+            (2.0, 2, False, True),   # Back to 2
+            (1.5, 1, False, True),   # Jitter again
+            (3.0, 2, False, True),   # Back to 2 (never steady for 5 sec)
+        ],
+    ),
+]
+
+# Cylinder counts to simulate.  Add or remove values here to change the run.
+SUPPORTED_CYLINDER_COUNTS = [4, 6, 8]
+
+
+def cleanup_output_files():
+    """Delete any existing simulation CSV/PNG output files before a fresh run.
+
+    Only files whose names begin with a known cylinder-count prefix (e.g.
+    '4cyl_', '6cyl_', '8cyl_') are removed, so unrelated project files are
+    left untouched.
+    """
+    prefixes = tuple(f"{cyl}cyl_" for cyl in SUPPORTED_CYLINDER_COUNTS)
+    removed: list[Path] = []
+
+    for ext in ("*.csv", "*.png"):
+        for path in SCRIPT_DIR.glob(ext):
+            if path.name.startswith(prefixes):
+                path.unlink()
+                removed.append(path)
+
+    if removed:
+        if _RICH:
+            console.print(
+                f"  [dim]🗑  Removed {len(removed)} stale output file"
+                f"{'s' if len(removed) != 1 else ''}[/dim]"
+            )
+        else:
+            print(f"Removed {len(removed)} stale output file(s) before starting.")
+
+
 def main():
-    config = Config()
-    scenarios = [
-        (
-            "1_Start_Idle_Stabilization",
-            [
-                (10.0, 1, False, True),  # Start and idle for 10 seconds
-            ],
-        ),
-        (
-            "2_Power_To_Economy",
-            [
-                (2.0, 1, False, True),   # Start and stabilize
-                (3.0, 2, False, True),   # Pedal to 2, RPM rises
-                (6.0, 2, False, True),   # Hold steady for 5+ seconds -> economy mode
-                (5.0, 2, False, True),   # Continue in economy
-            ],
-        ),
-        (
-            "3_Economy_Brake_Default",
-            [
-                (2.0, 1, False, True),   # Start
-                (3.0, 2, False, True),   # Power mode
-                (6.0, 2, False, True),   # Hold steady -> economy
-                (3.0, 2, False, True),   # Economy maintenance
-                (2.0, 2, True,  True),   # Brake -> back to default idle
-                (3.0, 1, False, True),   # Continue in default idle
-            ],
-        ),
-        (
-            "4_Pedal_Jitter_Mode1",
-            [
-                (2.0, 1, False, True),   # Start
-                (2.0, 2, False, True),   # Pedal to 2
-                (1.0, 1, False, True),   # Jitter: back to 1
-                (2.0, 2, False, True),   # Back to 2
-                (1.5, 1, False, True),   # Jitter again
-                (3.0, 2, False, True),   # Back to 2 (never steady for 5 sec)
-            ],
-        ),
-    ]
-
     print_banner()
+    cleanup_output_files()
 
-    total = len(scenarios)
-    for i, (name, inputs) in enumerate(scenarios, start=1):
+    # Build the full list of (scenario_name, config, inputs) tuples, one per
+    # cylinder-count × scenario combination, so all variants are run in order.
+    all_runs = []
+    for cyl in SUPPORTED_CYLINDER_COUNTS:
+        config = Config(cylinder_count=cyl)
+        for base_name, inputs in _SCENARIO_INPUTS:
+            # Prefix the scenario name with the cylinder count so output files
+            # from different engine variants never overwrite each other.
+            prefixed_name = f"{cyl}cyl_{base_name}"
+            all_runs.append((prefixed_name, config, inputs))
+
+    total = len(all_runs)
+    for i, (name, config, inputs) in enumerate(all_runs, start=1):
         run_scenario(name, config, inputs, index=i, total=total)
 
     print_completion_banner(total)
