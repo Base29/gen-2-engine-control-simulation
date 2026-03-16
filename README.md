@@ -1,4 +1,12 @@
-# Gen2 4-Cylinder Engine Control Simulation
+# Gen2 Engine Control Simulation
+
+---
+
+> ## ⚠️ READ THIS FIRST
+> ### 👉 [00_READ_ME_FIRST.md](00_READ_ME_FIRST.md)
+> **Start here before anything else.** This file contains essential context, prerequisites, and important notes about the simulation. Do not skip it.
+
+---
 
 A comprehensive simulation of a Gen2 engine control algorithm featuring a state machine with idle, power, and economy modes. The simulation models RPM dynamics, Hall sensor pulse generation, and intelligent pulse scheduling across 4 cylinders.
 
@@ -8,9 +16,11 @@ A comprehensive simulation of a Gen2 engine control algorithm featuring a state 
 
 **New to this simulation? Read these files in order:**
 
-1. **START_HERE.md** - Quick start guide with step-by-step instructions
-2. **SCENARIO_NOTES.md** - Detailed explanation of what happens in each scenario
-3. **README.md** (this file) - Complete technical documentation
+1. 📋 **[00_READ_ME_FIRST.md](00_READ_ME_FIRST.md)** — Essential context and prerequisites *(start here!)*
+2. ⚡ **[START_HERE.md](START_HERE.md)** — Quick start guide with step-by-step instructions
+3. 🔬 **[SIMULATION_GUIDE.md](SIMULATION_GUIDE.md)** — Detailed scenario walkthroughs and output file reference
+4. 📓 **[SCENARIO_NOTES.md](SCENARIO_NOTES.md)** — Additional scenario notes
+5. 📖 **README.md** (this file) — Complete technical documentation
 
 ---
 
