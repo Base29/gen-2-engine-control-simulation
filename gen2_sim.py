@@ -46,10 +46,11 @@ PULSE SCHEDULING:
 """
 
 import csv
+import math
 import os
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import List, Tuple
@@ -61,6 +62,22 @@ import matplotlib.pyplot as plt
 # Resolve output directory to the folder that contains this script,
 # regardless of the working directory the user launches it from.
 SCRIPT_DIR = Path(__file__).resolve().parent
+
+# ---------------------------------------------------------------------------
+# RPM sanity bounds – used by validation helper and AdvanceTable defaults.
+# ---------------------------------------------------------------------------
+_MAX_VALID_RPM: float = 8_000.0
+
+
+def _validate_rpm(value: float, name: str) -> float:
+    """Return *value* clamped to [0, _MAX_VALID_RPM].
+
+    Raises ValueError for NaN / ±Inf so that corrupt Hall measurements never
+    silently propagate into firing decisions.
+    """
+    if not math.isfinite(value):
+        raise ValueError(f"{name} is non-finite: {value!r}")
+    return max(0.0, min(value, _MAX_VALID_RPM))
 
 # ---------------------------------------------------------------------------
 # Optional rich terminal UI – falls back to plain print() if not installed.
@@ -180,6 +197,56 @@ _IDLE_RPM = {
 
 
 @dataclass
+class AdvanceTable:
+    """RPM → advance-output lookup table used in MODE1_POWER.
+
+    Each breakpoint is an (rpm, advance_pct) pair where advance_pct is in
+    [0.0, 1.0].  Pairs must be sorted by RPM (ascending).  Linear
+    interpolation is used between breakpoints, clamped at the extremes.
+
+    The curve below approximates a centrifugal-advance characteristic:
+    - Near idle RPM  → little advance (engine not yet loaded)
+    - Above ~2 000 RPM → full advance authority
+    """
+    breakpoints: tuple = (
+        (  600, 0.00),
+        (  900, 0.25),
+        ( 1_400, 0.60),
+        ( 2_000, 0.85),
+        ( 3_000, 1.00),
+    )
+
+
+def compute_advance_output(rpm: float, table: AdvanceTable) -> float:
+    """Linearly interpolate the advance fraction for *rpm* from *table*.
+
+    Returns a value in [0.0, 1.0].  This is a pure function with no
+    side-effects, making it straightforward to unit-test in isolation.
+
+    Analogy: on a mechanical distributor the centrifugal weights move
+    further out as RPM rises, advancing the ignition timing.  Here, the
+    returned fraction drives the Mode-1 firing threshold upward so that the
+    control system allows higher RPM before cutting pulses – the software
+    equivalent of progressive cam / timing advance.
+    """
+    breakpoints = table.breakpoints
+    if rpm <= breakpoints[0][0]:
+        return breakpoints[0][1]
+    if rpm >= breakpoints[-1][0]:
+        return breakpoints[-1][1]
+
+    for i in range(len(breakpoints) - 1):
+        rpm_lo, adv_lo = breakpoints[i]
+        rpm_hi, adv_hi = breakpoints[i + 1]
+        if rpm_lo <= rpm <= rpm_hi:
+            # Linear interpolation between adjacent breakpoints.
+            t = (rpm - rpm_lo) / (rpm_hi - rpm_lo)
+            return adv_lo + t * (adv_hi - adv_lo)
+
+    return breakpoints[-1][1]  # unreachable, but satisfies type checker
+
+
+@dataclass
 class Config:
     dt: float = 0.01            # timestep in seconds
     cylinder_count: int = 4     # supported: 4, 6, 8
@@ -191,6 +258,13 @@ class Config:
     filter_alpha: float = 0.1   # low-pass filter coefficient
     noise_enabled: bool = False
     noise_seed: int = 42
+    # RPM headroom added to idle_min at full advance (replaces bare magic number).
+    max_advance_rpm: float = 400.0
+    # Anti-chatter: minimum seconds to stay in a mode after any Mode-1 ↔ Mode-2
+    # switch.  Prevents rapid oscillation when RPM sits near the boundary.
+    mode2_min_dwell_s: float = 2.0
+    # Advance-curve lookup table (see AdvanceTable above).
+    advance_table: AdvanceTable = field(default_factory=AdvanceTable)
     # Optional overrides – if None, derived automatically from cylinder_count.
     default_idle_rpm_min: float = None          # type: ignore[assignment]
     power_firing_sequence: tuple = None         # type: ignore[assignment]
@@ -205,6 +279,10 @@ class Config:
             self.default_idle_rpm_min = _IDLE_RPM[self.cylinder_count]
         if self.power_firing_sequence is None:
             self.power_firing_sequence = _FIRING_SEQUENCES[self.cylinder_count]
+        if self.max_advance_rpm <= 0:
+            raise ValueError("max_advance_rpm must be positive")
+        if self.mode2_min_dwell_s < 0:
+            raise ValueError("mode2_min_dwell_s must be non-negative")
 
 
 class EngineSimulator:
@@ -218,19 +296,25 @@ class EngineSimulator:
         self.power_sequence_index = 0  # Track position in power firing sequence
         self.last_pulse_time = -999.0
         self.time = 0.0
-        
+
         # Hall sensor simulation
         self.last_hall_time = 0.0
         self.hall_interval = 0.0
-        
+
+        # RPM-advance compensation output (0.0 = no advance, 1.0 = full advance).
+        # Updated every step from the AdvanceTable; exposed in CSV for review.
+        self.advance_output: float = 0.0
+
         # Mode tracking
         self.standard_rpm_target = None
         self.pedal_steady_start = None
         self.last_pedal_pos = 1
-        
+        # Anti-chatter lockout: simulation time before a mode-switch is allowed.
+        self._mode2_lockout_until: float = 0.0
+
         # Logging
         self.log: List[dict] = []
-        
+
         if config.noise_enabled:
             random.seed(config.noise_seed)
     
@@ -253,12 +337,16 @@ class EngineSimulator:
         target = self.get_active_rpm_target()
         
         if self.state == State.MODE1_POWER:
-            # More aggressive firing in power mode (4 cylinders)
-            return self.filtered_rpm < target + 200.0
+            # Progressive threshold: as RPM rises, advance_output climbs toward
+            # 1.0 and the firing threshold rises by up to max_advance_rpm.
+            # This mirrors centrifugal/vacuum advance on a mechanical distributor:
+            # the system allows higher RPM before backing off pulses.
+            threshold = target + self.advance_output * self.config.max_advance_rpm
+            return self.filtered_rpm < threshold
         elif self.state in [State.DEFAULT_IDLE, State.MODE2_ECONOMY]:
             # Hysteresis-based firing (1 cylinder at idle/economy)
             return self.filtered_rpm < (target - self.config.hysteresis)
-        
+
         return False
     
     def fire_pulse(self):
@@ -280,22 +368,24 @@ class EngineSimulator:
             # Hall pulse interval based on true RPM (60 sec/min, pulses per revolution)
             pulses_per_rev = self.config.cylinder_count
             interval = 60.0 / (self.true_rpm * pulses_per_rev)
-            
+
             if self.time - self.last_hall_time >= interval:
                 self.hall_interval = self.time - self.last_hall_time
                 self.last_hall_time = self.time
-                
-                # Estimate RPM from Hall interval
+
+                # Estimate RPM from Hall interval; validate before storing.
                 if self.hall_interval > 0:
-                    self.measured_rpm = 60.0 / (self.hall_interval * pulses_per_rev)
+                    raw = 60.0 / (self.hall_interval * pulses_per_rev)
+                    self.measured_rpm = _validate_rpm(raw, "measured_rpm")
         else:
             self.measured_rpm = 0.0
-    
+
     def update_filtered_rpm(self):
-        """Apply low-pass filter to measured RPM."""
+        """Apply low-pass filter to measured RPM, then validate the result."""
         alpha = self.config.filter_alpha
-        self.filtered_rpm = alpha * self.measured_rpm + (1 - alpha) * self.filtered_rpm
-    
+        raw = alpha * self.measured_rpm + (1 - alpha) * self.filtered_rpm
+        self.filtered_rpm = _validate_rpm(raw, "filtered_rpm")
+
     def update_rpm_physics(self):
         """Update true RPM based on drag."""
         self.true_rpm -= self.config.drag * self.true_rpm * self.config.dt
@@ -327,30 +417,52 @@ class EngineSimulator:
             elif self.pedal_steady_start is not None:
                 steady_duration = self.time - self.pedal_steady_start
                 if steady_duration >= self.config.pedal_steady_seconds:
-                    # Transition to economy mode
-                    self.standard_rpm_target = self.filtered_rpm
-                    self.state = State.MODE2_ECONOMY
-        
+                    # Anti-chatter guard: only switch if we are past the dwell
+                    # lockout window set by the previous mode transition.
+                    if self.time >= self._mode2_lockout_until:
+                        self.standard_rpm_target = self.filtered_rpm
+                        self.state = State.MODE2_ECONOMY
+                        # Arm the lockout so rapid re-entry is blocked.
+                        self._mode2_lockout_until = (
+                            self.time + self.config.mode2_min_dwell_s
+                        )
+
         elif self.state == State.MODE2_ECONOMY:
             if brake:
                 self.state = State.DEFAULT_IDLE
                 self.pedal_steady_start = None
+                # Arm lockout: prevents immediately snapping back to Mode 2
+                # if the pedal is still at position 2 after the brake release.
+                self._mode2_lockout_until = (
+                    self.time + self.config.mode2_min_dwell_s
+                )
                 # Note: standard_rpm_target persists unless explicitly reset
-            elif pedal_pos == 2:
-                self.state = State.MODE1_POWER
+            elif pedal_pos != 2:
+                # Driver released the accelerator: return to idle.
+                self.state = State.DEFAULT_IDLE
                 self.pedal_steady_start = None
+            # pedal_pos == 2 while already in Mode 2 → stay in Mode 2 (cruise hold).
+            # A fresh re-acceleration demand after releasing the pedal is handled
+            # on the subsequent step via the DEFAULT_IDLE → MODE1_POWER transition.
     
     def step(self, pedal_pos: int, brake: bool, start_cmd: bool) -> dict:
         """Execute one simulation timestep."""
         self.update_state(pedal_pos, brake, start_cmd)
-        
+
         if self.should_fire_pulse():
             self.fire_pulse()
-        
+
         self.update_rpm_physics()
         self.update_hall_sensor()
         self.update_filtered_rpm()
-        
+
+        # Recompute advance output after RPM is updated so the value logged
+        # reflects the state at the *end* of this timestep (matches next step's
+        # firing decision).
+        self.advance_output = compute_advance_output(
+            self.filtered_rpm, self.config.advance_table
+        )
+
         # Log state
         log_entry = {
             'time': self.time,
@@ -360,12 +472,13 @@ class EngineSimulator:
             'true_rpm': self.true_rpm,
             'measured_rpm': self.measured_rpm,
             'filtered_rpm': self.filtered_rpm,
+            'advance_output': self.advance_output,
             'cylinder': self.current_cylinder,
             'standard_target': self.standard_rpm_target if self.standard_rpm_target else 0.0,
-            'active_target': self.get_active_rpm_target()
+            'active_target': self.get_active_rpm_target(),
         }
         self.log.append(log_entry)
-        
+
         self.time += self.config.dt
         return log_entry
     

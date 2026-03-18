@@ -5,6 +5,8 @@
 > ## ⚠️ READ THIS FIRST
 > ### 👉 [00_READ_ME_FIRST.md](00_READ_ME_FIRST.md)
 > **Start here before anything else.** This file contains essential context, prerequisites, and important notes about the simulation. Do not skip it.
+>
+> 🆕 **Recent changes?** See [CHANGES.md](CHANGES.md) for a full description of the latest updates to `gen2_sim.py` and the new test suite.
 
 ---
 
@@ -21,6 +23,7 @@ A comprehensive simulation of a Gen2 engine control algorithm featuring a state 
 3. 🔬 **[SIMULATION_GUIDE.md](SIMULATION_GUIDE.md)** — Detailed scenario walkthroughs and output file reference
 4. 📓 **[SCENARIO_NOTES.md](SCENARIO_NOTES.md)** — Additional scenario notes
 5. 📖 **README.md** (this file) — Complete technical documentation
+6. 🆕 **[CHANGES.md](CHANGES.md)** — Latest changes: RPM advance compensation, anti-chatter mode switching, RPM validation, and test suite
 
 ---
 
