@@ -228,3 +228,58 @@ class TestEngineEventBuffer:
         # Next step with no transition → no events
         sim.step(1, False, True)
         assert len(sim.event_buffer) == 0
+
+
+# ---------------------------------------------------------------------------
+# 8. Solenoids
+# ---------------------------------------------------------------------------
+
+class TestSolenoids:
+    def test_purge_solenoid_cycles(self):
+        ctrl = _make_controller()
+        # Run for 15 seconds (dt=0.01 -> 1500 steps)
+        # Purge is open for first 2s of every 10s cycle
+        ctrl.run_steps(10, pedal_pos=1, brake=False, start_cmd=True)
+        state = ctrl.get_state()
+        assert state.solenoids["Purge"] is True
+        
+        # Run past 2 seconds
+        ctrl.run_steps(200, pedal_pos=1, brake=False, start_cmd=True)
+        state = ctrl.get_state()
+        assert state.solenoids["Purge"] is False
+
+    def test_vvt_solenoid_at_high_rpm(self):
+        ctrl = _make_controller(pulse_gain=200.0, pedal_steady_seconds=10.0, max_advance_rpm=4000.0, dt=0.001) # High gain + small dt
+        ctrl.run_steps(100, pedal_pos=1, brake=False, start_cmd=True) # Start engine
+        
+        # Accelerate
+        ctrl.run_steps(100, pedal_pos=2, brake=False, start_cmd=True)
+        state = ctrl.get_state()
+        # VVT should trigger > 3500 RPM
+        if state.filtered_rpm > 3500:
+            assert state.solenoids["VVT"] is True
+        else:
+            # Run more steps (with dt=0.001, we need more steps to cover time)
+            ctrl.run_steps(5000, pedal_pos=2, brake=False, start_cmd=True)
+            state = ctrl.get_state()
+            assert state.filtered_rpm > 3500
+            assert state.solenoids["VVT"] is True
+
+    def test_deactivation_solenoid_in_economy(self):
+        ctrl = _make_controller(pedal_steady_seconds=1.0)
+        ctrl.run_steps(100, pedal_pos=1, brake=False, start_cmd=True) # Start
+        
+        # Steady pedal for 1.1s
+        ctrl.run_steps(10, pedal_pos=2, brake=False, start_cmd=True) # POWER mode
+        ctrl.run_steps(110, pedal_pos=2, brake=False, start_cmd=True) # Steady
+        
+        state = ctrl.get_state()
+        assert state.state == "MODE2_ECONOMY"
+        assert state.solenoids["Deactivation"] is True
+
+    def test_solenoid_events_emitted(self):
+        ctrl = _make_controller()
+        # Transitioning to IDLE triggers Purge (if not OFF)
+        ctrl.run_steps(10, pedal_pos=1, brake=False, start_cmd=True)
+        events = ctrl.get_events()
+        assert any(e.category == EventCategory.SOLENOID for e in events)

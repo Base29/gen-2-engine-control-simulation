@@ -33,6 +33,8 @@ class SimState:
     rpm_valid: bool
     compensation_active: bool
     anti_chatter_active: bool
+    solenoids: Dict[str, bool]
+    fuel_consumed: float
 
 
 class SimulationController:
@@ -102,7 +104,7 @@ class SimulationController:
     # ------------------------------------------------------------------
 
     def run_step(self, pedal_pos: int = 1, brake: bool = False,
-                 start_cmd: bool = True) -> Optional[dict]:
+                 start_cmd: bool = True, load: float = 1.0) -> Optional[dict]:
         """Execute a single simulation timestep.
 
         Returns the log entry dict, or None if no simulator exists.
@@ -110,7 +112,7 @@ class SimulationController:
         if self._sim is None:
             self.reset()
 
-        entry = self._sim.step(pedal_pos, brake, start_cmd)
+        entry = self._sim.step(pedal_pos, brake, start_cmd, load)
         self._step_count += 1
 
         # Drain the engine's event buffer into our collected events
@@ -120,11 +122,11 @@ class SimulationController:
         return entry
 
     def run_steps(self, n: int, pedal_pos: int = 1, brake: bool = False,
-                  start_cmd: bool = True) -> List[dict]:
+                  start_cmd: bool = True, load: float = 1.0) -> List[dict]:
         """Execute *n* simulation timesteps with the same inputs."""
         results = []
         for _ in range(n):
-            entry = self.run_step(pedal_pos, brake, start_cmd)
+            entry = self.run_step(pedal_pos, brake, start_cmd, load)
             if entry:
                 results.append(entry)
         return results
@@ -174,6 +176,7 @@ class SimulationController:
                 standard_rpm_target=0.0, active_target=0.0,
                 is_running=False, rpm_valid=True,
                 compensation_active=False, anti_chatter_active=False,
+                solenoids={}, fuel_consumed=0.0,
             )
 
         sim = self._sim
@@ -191,6 +194,8 @@ class SimulationController:
             rpm_valid=0 <= sim.filtered_rpm <= 8000,
             compensation_active=sim.advance_output > 0.01,
             anti_chatter_active=sim.time < sim._mode2_lockout_until,
+            solenoids=sim.solenoids.copy(),
+            fuel_consumed=sim.fuel_consumed,
         )
 
     def get_events(self) -> List[SimEvent]:

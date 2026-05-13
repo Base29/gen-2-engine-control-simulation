@@ -20,10 +20,12 @@ A comprehensive simulation of a Gen2 engine control algorithm featuring a state 
 
 1. 📋 **[00_READ_ME_FIRST.md](00_READ_ME_FIRST.md)** — Essential context and prerequisites *(start here!)*
 2. ⚡ **[START_HERE.md](START_HERE.md)** — Quick start guide with step-by-step instructions
-3. 🔬 **[SIMULATION_GUIDE.md](SIMULATION_GUIDE.md)** — Detailed scenario walkthroughs and output file reference
-4. 📓 **[SCENARIO_NOTES.md](SCENARIO_NOTES.md)** — Additional scenario notes
-5. 📖 **README.md** (this file) — Complete technical documentation
-6. 🆕 **[CHANGES.md](CHANGES.md)** — Latest changes: RPM advance compensation, anti-chatter mode switching, RPM validation, and test suite
+3. 🎮 **[SIMULATION_OPERATIONS.md](SIMULATION_OPERATIONS.md)** — How to run and check simulation data (Layman-friendly)
+4. 🔌 **[SOLENOIDS_GUIDE.md](SOLENOIDS_GUIDE.md)** — Detailed guide to VVT, Deactivation, and Purge solenoids
+5. 🔬 **[SIMULATION_GUIDE.md](SIMULATION_GUIDE.md)** — Technical scenario walkthroughs and output file reference
+6. 📓 **[SCENARIO_NOTES.md](SCENARIO_NOTES.md)** — Additional scenario notes
+7. 📖 **README.md** (this file) — Complete technical documentation
+8. 🆕 **[CHANGES.md](CHANGES.md)** — Latest changes: RPM advance compensation, anti-chatter mode switching, RPM validation, and test suite
 
 ---
 

@@ -86,6 +86,7 @@ st.markdown("""
     .event-switch  { background: #1a2a1a; border-left: 3px solid #66bb6a; }
     .event-warning { background: #2a2a1a; border-left: 3px solid #ffa726; }
     .event-system  { background: #1a1a2a; border-left: 3px solid #9575cd; }
+    .event-solenoid { background: #2a1a2a; border-left: 3px solid #f06292; }
 
     /* --- Metric improvements --- */
     [data-testid="stMetricValue"] { font-size: 1.4rem; }
@@ -128,6 +129,7 @@ def _init_session_state():
         "drag": 0.05,
         # Steps per tick
         "steps_per_tick": 50,
+        "load": 1.0,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -182,6 +184,16 @@ def _rpm_delta():
         return f"{curr - prev:+.1f}"
     return None
 
+def _fuel_rate():
+    if len(st.session_state.history) >= 20:
+        # Calculate avg pulses over last 20 steps (approx 0.2s)
+        window = st.session_state.history[-20:]
+        pulses = window[-1]["fuel_consumed"] - window[0]["fuel_consumed"]
+        time_delta = window[-1]["time"] - window[0]["time"]
+        if time_delta > 0:
+            return pulses / time_delta
+    return 0.0
+
 _MODE_LABELS = {
     "OFF": "🔴 Off",
     "DEFAULT_IDLE": "🔵 Idle",
@@ -192,12 +204,13 @@ _MODE_LABELS = {
 _RPM_STATUS = "✅ Valid" if sim_state.rpm_valid else "❌ Invalid"
 _SYS_STATUS = "▶️ Running" if st.session_state.is_running else "⏸️ Paused"
 
-m1, m2, m3, m4, m5 = st.columns(5)
+m1, m2, m3, m4, m5, m6 = st.columns(6)
 m1.metric("RPM", f"{sim_state.filtered_rpm:.0f}", _rpm_delta())
 m2.metric("Active Mode", _MODE_LABELS.get(sim_state.state, sim_state.state))
-m3.metric("Advance", f"{sim_state.advance_output:.0%}")
-m4.metric("RPM Status", _RPM_STATUS)
-m5.metric("System State", _SYS_STATUS)
+m3.metric("Fuel Rate", f"{_fuel_rate():.1f} p/s")
+m4.metric("Total Fuel", f"{sim_state.fuel_consumed:.0f}")
+m5.metric("RPM Status", _RPM_STATUS)
+m6.metric("System State", _SYS_STATUS)
 
 st.divider()
 
@@ -248,6 +261,13 @@ with col_controls:
             value=st.session_state.brake,
             help="Turn ON to apply the brake (safety override — returns engine to idle)"
         )
+
+    st.session_state.load = st.slider(
+        "⛰️ Engine Load (Terrain)",
+        min_value=0.5, max_value=3.0, value=st.session_state.load,
+        step=0.1,
+        help="Simulate driving uphill or carrying cargo. Higher load makes the engine work harder."
+    )
 
     eng_c1, eng_c2 = st.columns(2)
     with eng_c1:
@@ -357,6 +377,35 @@ with col_controls:
 with col_state:
     st.subheader("🔍 Live Engine State")
 
+    # 0. Visual Engine Block
+    def _render_engine_block(sim_state):
+        num_cyl = st.session_state.cylinder_count
+        cols = st.columns(num_cyl)
+        active_cyl = sim_state.current_cylinder
+        
+        # Check if engine just fired in the last 0.05s
+        is_firing = any(h["cylinder"] == active_cyl and h["time"] > sim_state.time - 0.05 for h in st.session_state.history[-5:]) if st.session_state.history else False
+
+        for i in range(num_cyl):
+            with cols[i]:
+                # Firing color logic
+                firing_now = (i == active_cyl and is_firing)
+                bg_color = "#ff9800" if firing_now else "#263238"
+                shadow = "0 0 15px #ff9800" if firing_now else "none"
+                border = "2px solid #ffb74d" if firing_now else "2px solid #455a64"
+                
+                st.markdown(
+                    f'<div style="background-color: {bg_color}; height: 50px; border-radius: 8px; '
+                    f'display: flex; align-items: center; justify-content: center; '
+                    f'border: {border}; box-shadow: {shadow}; transition: all 0.1s ease-out;">'
+                    f'<span style="font-weight: 800; color: {"#fff" if firing_now else "#78909c"};">'
+                    f'{i+1}</span></div>',
+                    unsafe_allow_html=True
+                )
+        st.caption(f"Engine Layout: {num_cyl}-Cylinder firing in sequence.")
+
+    _render_engine_block(sim_state)
+
     # 1. Active Mode (large badge)
     badge_class = {
         "OFF": "mode-off",
@@ -407,6 +456,31 @@ with col_state:
             unsafe_allow_html=True,
         )
 
+    # 2.5 Solenoid Indicators & Diagnostics
+    st.markdown("#### 🔌 Solenoid Diagnostics")
+    st.caption("Click a solenoid to see its role in the engine.")
+    sol_cols = st.columns(3)
+    sol_names = ["VVT", "Deactivation", "Purge"]
+    sol_expl = {
+        "VVT": "Variable Valve Timing: Boosts power at high RPM.",
+        "Deactivation": "Economy Mode: Shuts off cylinders to save gas.",
+        "Purge": "Purge Valve: Cleans out fuel vapors periodically."
+    }
+    for i, name in enumerate(sol_names):
+        is_active = sim_state.solenoids.get(name, False)
+        with sol_cols[i]:
+            if st.button(name, key=f"diag_{name}", help=sol_expl[name]):
+                st.session_state.explanation = f"🔍 **{name} Diagnostic:** {sol_expl[name]}"
+            
+            st.markdown(
+                f'<div style="text-align: center; margin-top: -10px;">'
+                f'<div style="width: 10px; height: 10px; border-radius: 50%; '
+                f'background-color: {"#66bb6a" if is_active else "#3a3a3a"}; '
+                f'display: inline-block; margin-right: 5px; box-shadow: {"0 0 5px #66bb6a" if is_active else "none"};"></div>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+
     # 3. Explanation panel (MANDATORY)
     st.markdown("#### 💡 What's Happening")
     st.markdown(
@@ -423,7 +497,7 @@ with col_state:
             st.metric("Filtered RPM", f"{sim_state.filtered_rpm:.1f}")
         with det_c2:
             st.metric("Active Target", f"{sim_state.active_target:.0f} RPM")
-            st.metric("Cruise Target", f"{sim_state.standard_rpm_target:.0f} RPM")
+            st.metric("Total Fuel Consumed", f"{sim_state.fuel_consumed:.0f}")
             st.metric("Simulation Time", f"{sim_state.time:.2f}s")
 
 
@@ -472,6 +546,7 @@ if st.session_state.is_running:
         pedal_pos=st.session_state.pedal_pos,
         brake=st.session_state.brake,
         start_cmd=st.session_state.start_cmd,
+        load=st.session_state.load,
     )
     st.session_state.history = ctrl.get_history()
     st.session_state.events = ctrl.get_events()
@@ -485,28 +560,84 @@ if st.session_state.is_running:
         state = ctrl.get_state()
         if state.state == "DEFAULT_IDLE":
             st.session_state.explanation = (
-                f"Engine is idling at **{state.filtered_rpm:.0f} RPM**. "
-                f"One cylinder fires intermittently to hold RPM above "
-                f"**{state.active_target:.0f} RPM**."
+                f"💤 The engine is **taking a breather** at {state.filtered_rpm:.0f} RPM. "
+                f"It's just 'sipping' fuel to stay awake."
             )
         elif state.state == "MODE1_POWER":
-            st.session_state.explanation = (
-                f"All cylinders are firing in sequence. RPM is climbing at "
-                f"**{state.filtered_rpm:.0f} RPM**. Advance compensation is at "
-                f"**{state.advance_output:.0%}**."
-            )
+            msg = f"🚀 **Full Power!** All cylinders are firing to speed us up. "
+            if state.solenoids.get("VVT"):
+                msg += "VVT has engaged for maximum efficiency!"
+            st.session_state.explanation = msg
         elif state.state == "MODE2_ECONOMY":
             st.session_state.explanation = (
-                f"Economy mode — maintaining cruise at **{state.standard_rpm_target:.0f} RPM** "
-                f"target. Only one cylinder fires for efficiency."
+                f"🌱 **Eco-Cruising!** We've reached a steady speed. "
+                f"Cylinder Deactivation is active to save you gas."
             )
+            if st.session_state.load > 1.5:
+                st.session_state.explanation += " (Even with this heavy load!)"
         elif state.state == "OFF":
-            st.session_state.explanation = "Engine is **off**. Press Start to begin."
+            st.session_state.explanation = "⬛ The engine is **sleeping**. Press Start to wake it up!"
 
 
 # ══════════════════════════════════════════════════════════════════════
 # CHARTS SECTION (full width)
 # ══════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════
+# GAUGES SECTION
+# ══════════════════════════════════════════════════════════════════════
+
+def _render_gauges(sim_state):
+    g1, g2 = st.columns(2)
+    
+    # RPM Gauge
+    with g1:
+        fig_rpm = go.Figure(go.Indicator(
+            mode = "gauge+number",
+            value = sim_state.filtered_rpm,
+            title = {'text': "Engine RPM"},
+            gauge = {
+                'axis': {'range': [0, 8000], 'tickwidth': 1, 'tickcolor': "white"},
+                'bar': {'color': "#42a5f5"},
+                'bgcolor': "rgba(0,0,0,0)",
+                'borderwidth': 2,
+                'bordercolor': "#555",
+                'steps': [
+                    {'range': [0, 1000], 'color': 'rgba(0, 255, 0, 0.1)'},
+                    {'range': [6000, 8000], 'color': 'rgba(255, 0, 0, 0.2)'}],
+                'threshold': {
+                    'line': {'color': "red", 'width': 4},
+                    'thickness': 0.75,
+                    'value': 7500}
+            }
+        ))
+        fig_rpm.update_layout(height=250, margin=dict(l=30, r=30, t=50, b=20), paper_bgcolor="rgba(0,0,0,0)", font={'color': "white"})
+        st.plotly_chart(fig_rpm, use_container_width=True)
+
+    # Efficiency Gauge
+    with g2:
+        # Simple Eco-Score: 100% at idle/economy, lower during high fuel rate
+        fr = _fuel_rate()
+        eco_score = max(0, 100 - (fr * 1.5)) if sim_state.state != "OFF" else 0
+        
+        fig_eco = go.Figure(go.Indicator(
+            mode = "gauge+number",
+            value = eco_score,
+            title = {'text': "Efficiency Score"},
+            gauge = {
+                'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "white"},
+                'bar': {'color': "#66bb6a" if eco_score > 70 else "#ffa726"},
+                'bgcolor': "rgba(0,0,0,0)",
+                'steps': [
+                    {'range': [0, 30], 'color': 'rgba(255, 0, 0, 0.1)'},
+                    {'range': [70, 100], 'color': 'rgba(0, 255, 0, 0.1)'}],
+            }
+        ))
+        fig_eco.update_layout(height=250, margin=dict(l=30, r=30, t=50, b=20), paper_bgcolor="rgba(0,0,0,0)", font={'color': "white"})
+        st.plotly_chart(fig_eco, use_container_width=True)
+
+st.divider()
+_render_gauges(sim_state)
 
 st.divider()
 st.subheader("📈 Performance Charts")
@@ -635,6 +766,7 @@ with col_log:
             EventCategory.SWITCH: "event-switch",
             EventCategory.WARNING: "event-warning",
             EventCategory.SYSTEM: "event-system",
+            EventCategory.SOLENOID: "event-solenoid",
         }
 
         # Show most recent first, up to 50 events

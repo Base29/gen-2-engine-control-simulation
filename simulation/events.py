@@ -16,6 +16,7 @@ class EventCategory(str, Enum):
     WARNING = "WARNING"
     SWITCH = "SWITCH"
     SYSTEM = "SYSTEM"
+    SOLENOID = "SOLENOID"
 
 
 @dataclass(frozen=True)

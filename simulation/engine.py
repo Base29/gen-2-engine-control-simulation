@@ -8,7 +8,7 @@ internal buffer that the controller layer consumes.
 """
 
 import random
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from simulation.config import (
     Config,
@@ -55,6 +55,17 @@ class EngineSimulator:
 
         # Structured event buffer — consumed and cleared by the controller
         self.event_buffer: List[SimEvent] = []
+
+        # Solenoid states (name -> active)
+        self.solenoids: Dict[str, bool] = {
+            "VVT": False,
+            "Deactivation": False,
+            "Purge": False,
+        }
+        self._last_purge_toggle: float = 0.0
+
+        # Fuel consumption (cumulative pulses)
+        self.fuel_consumed: float = 0.0
 
         if config.noise_enabled:
             random.seed(config.noise_seed)
@@ -103,8 +114,13 @@ class EngineSimulator:
 
     def fire_pulse(self):
         """Fire a pulse on the current cylinder and advance based on mode."""
-        self.true_rpm += self.config.pulse_gain
+        gain = self.config.pulse_gain
+        if self.solenoids.get("VVT"):
+            gain *= 1.2  # 20% power boost from VVT
+            
+        self.true_rpm += gain
         self.last_pulse_time = self.time
+        self.fuel_consumed += 1.0  # Each pulse counts as 1 unit of fuel
 
         if self.state == State.MODE1_POWER:
             self.current_cylinder = self.config.power_firing_sequence[self.power_sequence_index]
@@ -136,9 +152,13 @@ class EngineSimulator:
         raw = alpha * self.measured_rpm + (1 - alpha) * self.filtered_rpm
         self.filtered_rpm = validate_rpm(raw, "filtered_rpm")
 
-    def update_rpm_physics(self):
-        """Update true RPM based on drag."""
-        self.true_rpm -= self.config.drag * self.true_rpm * self.config.dt
+    def update_rpm_physics(self, load: float = 1.0):
+        """Update true RPM based on drag and load."""
+        drag = self.config.drag * load
+        if self.solenoids.get("Deactivation"):
+            drag *= 0.85  # 15% drag reduction from deactivation
+            
+        self.true_rpm -= drag * self.true_rpm * self.config.dt
         self.true_rpm = max(0.0, self.true_rpm)
 
     def update_state(self, pedal_pos: int, brake: bool, start_cmd: bool):
@@ -191,6 +211,27 @@ class EngineSimulator:
         if self.state != prev_state:
             self._emit_transition(prev_state, self.state, pedal_pos, brake)
 
+    def update_solenoids(self):
+        """Update solenoid states based on current conditions."""
+        # 1. VVT Solenoid: Active in POWER mode at high RPM
+        vvt_active = (self.state == State.MODE1_POWER and self.filtered_rpm > 3500)
+        self._set_solenoid("VVT", vvt_active, f"VVT Solenoid {'activated (RPM > 3500)' if vvt_active else 'deactivated (RPM < 3500)'}")
+
+        # 2. Deactivation Solenoid: Active in ECONOMY mode
+        deact_active = (self.state == State.MODE2_ECONOMY)
+        self._set_solenoid("Deactivation", deact_active, f"Cylinder Deactivation {'engaged' if deact_active else 'disengaged'}")
+
+        # 3. Purge Solenoid: Cycle every 10s for 2s
+        cycle_time = self.time % 10.0
+        purge_active = (self.state != State.OFF and cycle_time < 2.0)
+        self._set_solenoid("Purge", purge_active, f"Purge Solenoid {'opened' if purge_active else 'closed'}")
+
+    def _set_solenoid(self, name: str, active: bool, message: str):
+        """Set a solenoid's state and emit an event if it changed."""
+        if self.solenoids.get(name) != active:
+            self.solenoids[name] = active
+            self._emit(EventCategory.SOLENOID, message, solenoid=name, active=active)
+
     def _emit_transition(self, from_state: State, to_state: State,
                          pedal_pos: int, brake: bool):
         """Emit a human-readable transition event."""
@@ -231,14 +272,15 @@ class EngineSimulator:
     # Main step
     # ------------------------------------------------------------------
 
-    def step(self, pedal_pos: int, brake: bool, start_cmd: bool) -> dict:
+    def step(self, pedal_pos: int, brake: bool, start_cmd: bool, load: float = 1.0) -> dict:
         """Execute one simulation timestep.  Returns the log entry dict."""
         self.update_state(pedal_pos, brake, start_cmd)
+        self.update_solenoids()
 
         if self.should_fire_pulse():
             self.fire_pulse()
 
-        self.update_rpm_physics()
+        self.update_rpm_physics(load)
         self.update_hall_sensor()
         self.update_filtered_rpm()
 
@@ -258,6 +300,9 @@ class EngineSimulator:
             'cylinder': self.current_cylinder,
             'standard_target': self.standard_rpm_target if self.standard_rpm_target else 0.0,
             'active_target': self.get_active_rpm_target(),
+            'solenoids': self.solenoids.copy(),
+            'fuel_consumed': self.fuel_consumed,
+            'load': load,
         }
         self.log.append(log_entry)
 
